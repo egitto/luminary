@@ -160,6 +160,11 @@ engine = Engine(lights, default_registry().get("breathing_ring"))
 open("/tmp/frame.svg", "w").write(svg.lights_svg(lights, engine.colors_srgb8(t=8.0)))
 EOF
 
+# Headless screenshot of the *web client* mid-playback — the full
+# serve → codec → JS-decoder → canvas path — for display-less containers.
+# Needs `pip install playwright` + Chromium (see the script's docstring).
+python scripts/screenshot_pattern.py --pattern your_pattern -o shot.png
+
 # Gates (run before any PR; CI runs the same):
 black patterns/your_pattern.py
 python -m pytest                 # discovery + statelessness cover you automatically
