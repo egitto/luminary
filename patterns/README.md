@@ -186,6 +186,7 @@ Every file here is a worked example. By what it teaches:
 | `prism.py` | The `DX`/`DY` beam-direction columns — patterns impossible on a pixel grid |
 | `tidepool.py` | Closed-form event timing (flares scheduled by a moving crest) |
 | `vespers.py` | OKLab-vector color blending; multi-minute incommensurate orbits |
+| `life.py` | A CA rule chosen by measurement, not assumption; births and deaths as directional sweeps; hue as ancestry |
 
 `legacy/` holds pre-2.1 stateful patterns that don't meet this contract;
 `plasma_storm.py` is the worked example of converting one.
