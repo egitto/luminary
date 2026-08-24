@@ -4,7 +4,9 @@ A near-black field of hashed, slow-twinkling stars plus a handful of
 brighter steady "named stars," under which the piece periodically draws a
 constellation: 4-8 anchor vertices of the run/vertex graph (recovered from
 the lights array exactly as `border_chase.py` does), spread by greedy
-farthest-point sampling, joined into a chain figure by shortest paths
+farthest-point sampling WITHIN a compact local hop-radius neighborhood
+(round 4 -- see its revision note below; earlier revisions spread anchors
+across the whole graph), joined into a chain figure by shortest paths
 along the runs.
 
 Revision 2 (first cut read as "dull" -- background, not event). The fix,
@@ -106,6 +108,37 @@ sky tier + faster living anchors):
      whitens right at each twinkle peak, and the steady hold boost itself
      was raised (brighter). Amplitude was sized, then MEASURED against the
      per-frame slew scan (see report) rather than guessed.
+
+Revision 4 (direct feedback from the Lady: figures read "snakey," not
+"constellationy," and she wants the twinkle hand-tunable on playa):
+  1. ON-PLAYA TWINKLE TUNING -- the sky and anchor twinkle tiers' speed,
+     brightness, and color-temperature knobs (plus a per-star/per-anchor
+     variance for each) are now a single labeled block right after the
+     imports at the top of this file (`_SKY_TWINKLE_*`, `_ANCHOR_TWINKLE_*`).
+     Color temperature is new on the sky tier (a signed OKLab warm/cool
+     vector ADDITION at each star's own brightness peak, default
+     near-neutral); on the anchor tier it's round 3's existing
+     whiten-toward-white amount, reframed under the same name (not reset
+     to neutral -- "brighter and whiter" was itself the Lady's round-3
+     ask) with a new per-anchor variance. Every knob's comment states a
+     SAFE RANGE derived from the actual oscillation formulas, and
+     `_check_twinkle_slew_budget()` re-derives and asserts those bounds
+     once at import time -- an edit that blows the budget fails loading
+     the pattern, not silently on stage.
+  2. COMPACT FIGURES -- anchors are no longer spread by farthest-point
+     sampling across the WHOLE graph. A hashed seed vertex now defines a
+     `_FIGURE_HOP_RADIUS`-hop (2-hop) ball; every vertex outside it is
+     banned via the SAME `_restrict_adj` machinery item 2 above already
+     used for cross-track non-intersection, and farthest-point sampling
+     then runs (unchanged otherwise) inside that shrunken graph. Radius 2
+     from a single seed guarantees, by the triangle inequality, that any
+     two anchors end up within 4 hops of EACH OTHER, not just of the seed
+     -- the actual complaint ("snakey") was about anchor-to-anchor spread,
+     which a radius alone doesn't bound. Measured hop-diameter before/after
+     and the resulting change in cross-track rejection rate are in the
+     report; `_DRAW_MIN`/`_DRAW_MAX` were retuned to keep the draw pace
+     legible now that figures cover far less arclength (see the report for
+     the reasoning and the chosen numbers).
 """
 
 import heapq
@@ -117,6 +150,174 @@ import numpy as np
 from luminary.geometry.lights import LightColumns
 from luminary.patterns.base import Pattern
 from luminary.patterns.util import seeded_random
+
+# =====================================================================
+# STARLIGHT TWINKLE -- ON-PLAYA TUNING (round 4, the Lady's direct ask)
+# =====================================================================
+# Every number here can be hand-edited on a laptop with no code reading:
+# each knob is UNIT + WHAT IT DOES + a derived SAFE RANGE beyond which the
+# wire's per-frame slew caps (~0.24 L, ~0.09 C, ~89 deg H per light per
+# frame at 30fps) start to break. Twinkle stars are the piece's densest,
+# fastest-moving population, so they eat a real share of the slew budget;
+# these bounds are derived from the ACTUAL formulas below and re-checked
+# by `_check_twinkle_slew_budget()`, asserted once at import time near the
+# bottom of this constants section -- an on-playa edit that blows the
+# budget fails LOADING the pattern (visible immediately), not silently
+# on stage.
+#
+# Both tiers share the same six-knob shape: SPEED (how fast a star
+# oscillates, in Hz) and its per-star VARIANCE (spread around that
+# speed); BRIGHTNESS (peak L added above the resting floor/hold color)
+# and its VARIANCE; and TEMPERATURE (a signed OKLab warm<->cool nudge --
+# on the anchor tier, the existing whiten-toward-white amount -- applied
+# right at each twinkle's brightness peak, as a straight OKLab vector
+# ADDITION, never a hue lerp) and its VARIANCE. Brightness/speed spread
+# per star via a hashed (1 + VARIANCE*(2r-1)) multiplier; temperature
+# (signed) spreads via an additive (CENTER + VARIANCE*(2r-1)).
+#
+# SAFE RANGE MATH: a star oscillates as pos(t) = 0.5 + 0.5*sin(2*pi*f*t),
+# f in Hz, so |d(pos)/dt| <= pi*f. Brightness rides pos^2 on the sky tier
+# (a snappier peak, unchanged shape from round 3) or pos on the anchor
+# tier (also unchanged); temperature rides pos linearly on both. Working
+# through the chain rule (see the sky/anchor bounds below and
+# `_check_twinkle_slew_budget`) gives a bound on the PRODUCT
+# knob_max * speed_max for each of the brightness and temperature pairs;
+# each knob's comment below states that shared bound plus what it means
+# in practice if its partner knob stays at its current default.
+_FPS = 30.0
+_SLEW_TARGET = 0.08  # design margin under the ~0.24 L/frame hard cap; kept
+# well below the cap (rather than e.g. 0.20) because several envelopes
+# (line attack, head sweep, anchor flare, twinkle) can be active on the
+# same row within the same fraction of a second -- the harness checks
+# the SUM, so no single knob gets the whole budget to itself.
+_SLEW_TARGET_C = 0.03  # same idea for chroma (hard cap 0.09); the
+# temperature knobs move (a, b) directly, so they're checked against a
+# chroma-style budget rather than the L one.
+
+# --- sky tier (the one the Lady likes) ---
+_SKY_TWINKLE_HZ = 0.20  # Hz, center oscillation speed (period ~5s).
+# SAFE RANGE: BRIGHTNESS_max * HZ_max <= 0.588 (L*Hz). At the current
+# brightness default (peak 0.324 incl. variance) that's HZ <~ 1.1 Hz
+# before slew risk -- current 0.20 Hz has ~5x headroom.
+_SKY_TWINKLE_HZ_VARIANCE = 0.65  # fraction; per-star speed spread, so
+# actual per-star speed spans _SKY_TWINKLE_HZ * (1 +/- 0.65) =
+# 0.07-0.33 Hz (period ~3-14s, close to round 3's hashed 3-9s range).
+# SAFE RANGE: shares the 0.588 L*Hz bound above with BRIGHTNESS.
+_SKY_TWINKLE_BRIGHTNESS = 0.24  # L, center peak amplitude added above
+# _FLOOR_L at full twinkle (unchanged value from round 3's fixed 0.24).
+# SAFE RANGE: BRIGHTNESS_max * HZ_max <= 0.588. At the current speed
+# default (peak 0.33 Hz) that's BRIGHTNESS <~ 1.78 L before slew risk
+# (though L clips at 1.0 well before that) -- large headroom either way.
+_SKY_TWINKLE_BRIGHTNESS_VARIANCE = 0.35  # fraction; per-star brightness
+# spread (NEW in round 4 -- round 3's amplitude was fixed for every
+# twinkle star), so peak amplitude spans 0.24*(1 +/- 0.35) =
+# 0.156-0.324 L. SAFE RANGE: shares the 0.588 bound with HZ.
+_SKY_TWINKLE_TEMP = 0.0  # signed OKLab nudge magnitude, center -- 0 is
+# neutral (the Lady's ask: default near-neutral). Positive warms
+# (amber-ward), negative cools (blue-ward). NEW in round 4 -- round 3's
+# sky twinkle had no temperature concept at all.
+# SAFE RANGE: |TEMP|_max * HZ_max <= 0.287 (chroma-vector units * Hz).
+# At the current speed default that's |TEMP| <~ 0.87 before slew risk.
+_SKY_TWINKLE_TEMP_VARIANCE = 0.05  # per-star spread around TEMP, so with
+# TEMP=0 individual stars land anywhere in [-0.05, 0.05] -- a light,
+# barely-there warm/cool scatter across the field, not a visible bias.
+# SAFE RANGE: shares the 0.287 bound; |TEMP| + VARIANCE is the worst case.
+
+# --- anchor tier (fast twinkle on a constellation's stars while it holds) ---
+_ANCHOR_TWINKLE_HZ = 3.0  # Hz, center (unchanged range from round 3's
+# HZ_MIN=2.0/HZ_RANGE=2.0, reframed as center+variance below).
+# SAFE RANGE: BRIGHTNESS_max * HZ_max <= 0.764 (L*Hz). At the current
+# brightness default that's HZ <~ 11.8 Hz -- current 3 Hz has large
+# headroom (kept modest anyway per the original "~2-4 Hz" craft call,
+# a legibility choice, not a slew one).
+_ANCHOR_TWINKLE_HZ_VARIANCE = 0.333  # fraction; spans
+# 3.0*(1 +/- 0.333) = 2.0-4.0 Hz (identical range to round 3's form).
+# SAFE RANGE: shares the 0.764 bound with BRIGHTNESS.
+_ANCHOR_TWINKLE_BRIGHTNESS = 0.05  # L, center peak amplitude (unchanged
+# value from round 3's fixed _ANCHOR_TWINKLE_AMP_L).
+# SAFE RANGE: BRIGHTNESS_max * HZ_max <= 0.764. At the current speed
+# default (peak 4 Hz) that's BRIGHTNESS <~ 0.19 L -- large headroom.
+_ANCHOR_TWINKLE_BRIGHTNESS_VARIANCE = 0.30  # fraction; per-anchor spread
+# (NEW in round 4 -- round 3 had no per-anchor amplitude variance, only
+# frequency/phase varied). Spans 0.05*(1 +/- 0.30) = 0.035-0.065 L.
+# SAFE RANGE: shares the 0.764 bound with HZ.
+_ANCHOR_TWINKLE_TEMP = 0.55  # unsigned whiten-toward-white fraction at
+# peak (unchanged value from round 3's _ANCHOR_TWINKLE_DESAT -- an
+# established, deliberately-biased default, NOT reset to neutral like
+# the sky tier's, since "brighter and whiter" anchors were themselves
+# the Lady's round-3 ask).
+# SAFE RANGE: TEMP_max * HZ_max <= 4.775 (this bound scales inversely
+# with _ANCHOR_HOLD_BOOST_C, currently 0.06 -- see
+# `_check_twinkle_slew_budget`). At the current speed default that's
+# TEMP <~ 1.19 before slew risk.
+_ANCHOR_TWINKLE_TEMP_VARIANCE = 0.10  # per-anchor spread (NEW in round 4).
+# Spans 0.55 +/- 0.10 = 0.45-0.65. SAFE RANGE: shares the 4.775 bound;
+# TEMP + VARIANCE (0.65) leaves ~1.8x margin at the current HZ default.
+
+_TEMP_WARM_HUE = 40.0  # degrees; the sky tier's warm/cool axis. Cool is
+# the exact opposite direction (40+180=220, cyan-blue), so a single unit
+# vector at this hue covers both: a POSITIVE _SKY_TWINKLE_TEMP nudges
+# (a, b) toward this hue (warm/amber), NEGATIVE nudges the same vector's
+# negation (cool/blue) -- one OKLab vector addition, sign carries the
+# direction, never a hue lerp.
+
+
+def _check_twinkle_slew_budget() -> None:
+    """Re-derives the safe-range bounds stated in the comments above from
+    the ACTUAL formulas used in render()/`_build_figure`, and asserts the
+    current knob values stay inside them. Called once at import time
+    (after `_ANCHOR_HOLD_BOOST_C` is defined further down, since the
+    anchor temperature bound scales with it) -- see the call site. An
+    on-playa edit that violates a bound fails HERE, loudly, at pattern
+    load, rather than degrading silently on stage."""
+    # pos(t)=0.5+0.5 sin(theta); brightness rides pos^2 on the sky tier,
+    # so |d(pos^2)/dt| = 2*pos*|d(pos)/dt| peaks at 2*0.6495*pi*f (0.6495
+    # is max_theta[(0.5+0.5 sin theta)*cos theta], found by setting the
+    # derivative to zero -- see the module's punch-up-round precedent for
+    # _slew_safe_sigma's 0.6065 gaussian constant, same style of embedded
+    # derived constant).
+    sky_bright_bound = _SLEW_TARGET * _FPS / (2.0 * np.pi * 0.6495)
+    sky_temp_bound = _SLEW_TARGET_C * _FPS / np.pi
+    anchor_bright_bound = _SLEW_TARGET * _FPS / np.pi
+    anchor_temp_bound = (_SLEW_TARGET_C * _FPS / np.pi) / _ANCHOR_HOLD_BOOST_C
+
+    checks = [
+        (
+            "sky twinkle brightness*speed",
+            _SKY_TWINKLE_BRIGHTNESS
+            * (1.0 + _SKY_TWINKLE_BRIGHTNESS_VARIANCE)
+            * (_SKY_TWINKLE_HZ * (1.0 + _SKY_TWINKLE_HZ_VARIANCE)),
+            sky_bright_bound,
+            "_SKY_TWINKLE_BRIGHTNESS[_VARIANCE] or _SKY_TWINKLE_HZ[_VARIANCE]",
+        ),
+        (
+            "sky twinkle temperature*speed",
+            (abs(_SKY_TWINKLE_TEMP) + _SKY_TWINKLE_TEMP_VARIANCE)
+            * (_SKY_TWINKLE_HZ * (1.0 + _SKY_TWINKLE_HZ_VARIANCE)),
+            sky_temp_bound,
+            "_SKY_TWINKLE_TEMP[_VARIANCE] or _SKY_TWINKLE_HZ[_VARIANCE]",
+        ),
+        (
+            "anchor twinkle brightness*speed",
+            _ANCHOR_TWINKLE_BRIGHTNESS
+            * (1.0 + _ANCHOR_TWINKLE_BRIGHTNESS_VARIANCE)
+            * (_ANCHOR_TWINKLE_HZ * (1.0 + _ANCHOR_TWINKLE_HZ_VARIANCE)),
+            anchor_bright_bound,
+            "_ANCHOR_TWINKLE_BRIGHTNESS[_VARIANCE] or _ANCHOR_TWINKLE_HZ[_VARIANCE]",
+        ),
+        (
+            "anchor twinkle temperature*speed",
+            (_ANCHOR_TWINKLE_TEMP + _ANCHOR_TWINKLE_TEMP_VARIANCE)
+            * (_ANCHOR_TWINKLE_HZ * (1.0 + _ANCHOR_TWINKLE_HZ_VARIANCE)),
+            anchor_temp_bound,
+            "_ANCHOR_TWINKLE_TEMP[_VARIANCE] or _ANCHOR_TWINKLE_HZ[_VARIANCE]",
+        ),
+    ]
+    for name, actual, bound, fix in checks:
+        assert actual <= bound + 1e-9, (
+            f"{name} budget exceeded: {actual:.4f} > {bound:.4f} -- " f"reduce {fix}"
+        )
+
 
 # --- graph extraction (cribbed from border_chase.py; patterns are
 # single-file by contract, so this is duplicated rather than imported) ---
@@ -132,7 +333,35 @@ _GRAND_PROB = 0.2  # hashed "every ~5th slot" (menu item 7)
 _GRAND_HOLD_MULT = 1.6
 _GRAND_SKY_LIFT = 0.035  # whole-sky L lift while a grand figure holds
 
-_DRAW_MIN, _DRAW_MAX = 5.0, 9.0  # hashed range for a slot's draw duration (s)
+# Round 4 item 2 (the Lady: "make them only connect stars that are within
+# like, 4 triangles distance of each other... they're not constellationy
+# they're snakey as-is"). Anchors are now picked from a LOCAL hop-radius
+# ball around a hashed seed vertex, not farthest-point spread across the
+# whole graph. _FIGURE_HOP_RADIUS is a graph-EDGE-count (hop) radius, not
+# arclength -- 2 hops from the seed guarantees, by the triangle
+# inequality, that any two vertices in the ball are within
+# 2*_FIGURE_HOP_RADIUS = 4 hops of EACH OTHER (not just of the seed),
+# which is what "max pairwise hop distance across the whole figure" needs
+# -- a single-seed ball of radius 4 would only bound seed-to-anchor
+# distance, not anchor-to-anchor. See `_build_figure` for how the ball is
+# turned into a graph restriction (reusing the same `_restrict_adj`
+# machinery as round 3's cross-track non-intersection) and the report for
+# measured hop-diameters before/after.
+_FIGURE_HOP_RADIUS = 2
+
+_DRAW_MIN, _DRAW_MAX = 3.0, 5.5  # hashed range for a slot's draw duration
+# (s); trimmed from 5.0-9.0 in round 4. Compact figures (item 2) cover
+# ~5x less arclength on the star (mean ~289 units vs ~1400 before, same
+# unit=22.4) but draw_dur is intentionally hashed independent of length
+# (see the comment below), so leaving it unchanged would have meant the
+# SAME ~7s draw covering a much smaller physical area -- not "finishes
+# too fast" in elapsed time (it measurably doesn't), but a slower,
+# draggier pace for what's now a compact glyph rather than a
+# piece-spanning sweep. Judgment call: trimmed for a brisker, more
+# "snap together" self-assembly, sized so the per-light attack rise
+# (_RISE=0.8s) and the post-draw envelopes (pulse rise/fall, head tail)
+# still comfortably fit before the hold begins -- re-verified against the
+# exhaustive slew scan, not just eyeballed (see the report).
 _HOLD_DUR = 4.5
 _FADE_DUR = 3.0
 _RISE = 0.8  # per-light line attack; widened from an initial 0.15s after
@@ -227,15 +456,11 @@ _ANCHOR_FLARE_EXTRA_L = 0.30
 _ANCHOR_FLARE_EXTRA_C = 0.03
 _ANCHOR_FLARE_SIGMA_T = 0.16  # seconds; see _slew_safe_sigma's temporal analogue
 
-# round 3 item 4: fast small-amplitude twinkle on holding anchors, whitening
-# (desaturating) at each twinkle peak. Hashed per anchor, precomputed once
-# in _build_figure (never re-hashed per frame) as anchor_freq/anchor_phase.
-_ANCHOR_TWINKLE_HZ_MIN, _ANCHOR_TWINKLE_HZ_RANGE = 2.0, 2.0  # 2-4 Hz
-_ANCHOR_TWINKLE_AMP_L = 0.05  # small by design; see slew report for the
-# measured worst-case per-frame delta with breathing + hold-boost stacked
-_ANCHOR_TWINKLE_DESAT = 0.55  # fraction of the anchor's own chroma
-# contribution damped away at the twinkle's brightness peak -- ties
-# "brighter" to "whiter" rather than treating them as independent knobs
+# Round 3 item 4's fast per-anchor twinkle (speed/brightness/temperature +
+# variance) is now hand-tunable in the ON-PLAYA TUNING block right after
+# the imports at the top of this file (_ANCHOR_TWINKLE_*). It's checked
+# here, not there, because the check needs _ANCHOR_HOLD_BOOST_C above.
+_check_twinkle_slew_budget()
 
 _METEOR_GAP_BUFFER = 2.0  # s after a figure's lifespan before meteors may start
 _METEOR_END_BUFFER = 2.5  # s of quiet before the next slot begins drawing
@@ -253,7 +478,8 @@ _SHIMMER_WAVELEN_FACTOR = 3.0  # * unit
 # --- sky ---
 _FLOOR_L = 0.045
 _TWINKLE_FRACTION = 0.055  # raised from 0.035 (round 3 item 3: "more stars")
-_TWINKLE_PERIOD_MIN, _TWINKLE_PERIOD_RANGE = 3.0, 6.0  # 3-9 s
+# Speed/brightness/temperature + variance are hand-tunable in the ON-PLAYA
+# TUNING block at the top of this file (_SKY_TWINKLE_*).
 
 # round 3 item 3: a second, fainter/denser tier under the twinkle tier --
 # background texture only, never touched by the figure/vertex machinery.
@@ -498,6 +724,28 @@ def _dijkstra(
     return dist, pred_v, pred_e, pred_r
 
 
+def _bfs_hops(
+    adj: List[List[Tuple[int, int, bool, float]]], n: int, source: int
+) -> np.ndarray:
+    """Unweighted hop-count (edge-count, not arclength) BFS from `source`.
+    Round 4 item 2: used to find the local hop-radius ball a compact
+    figure's anchors are drawn from -- `_dijkstra`'s distances are
+    arclength, which is the wrong metric for "how many triangles apart,"
+    the Lady's actual complaint."""
+    hops = np.full(n, np.inf)
+    hops[source] = 0.0
+    frontier = [source]
+    while frontier:
+        nxt: List[int] = []
+        for u in frontier:
+            for v, e, rev, w in adj[u]:
+                if not np.isfinite(hops[v]):
+                    hops[v] = hops[u] + 1.0
+                    nxt.append(v)
+        frontier = nxt
+    return hops
+
+
 class _Figure:
     """One slot's constellation: concatenated path rows/arclength, its
     anchor light rows + arclength positions, total length, gradient
@@ -524,6 +772,8 @@ class _Figure:
         vertex_set: frozenset,
         anchor_freq: np.ndarray,
         anchor_phase: np.ndarray,
+        anchor_bright: np.ndarray,
+        anchor_temp: np.ndarray,
     ):
         self.rows = rows
         self.s = s
@@ -542,6 +792,8 @@ class _Figure:
         self.vertex_set = vertex_set
         self.anchor_freq = anchor_freq
         self.anchor_phase = anchor_phase
+        self.anchor_bright = anchor_bright
+        self.anchor_temp = anchor_temp
         self.speed = length / draw_dur if draw_dur > 0 else 0.0
         self.lifespan = draw_dur + hold_dur + _FADE_DUR
 
@@ -609,8 +861,15 @@ def _build_figure(
     spread routinely touches 30-45% of all vertices, so two independent
     figures on the same graph collide near-certainly. Restricting the
     search space is what actually gets a second/third figure on screen.)
-    If the restriction leaves too little connected, unoccupied graph for
-    `k` anchors, this returns None -- THAT is the real failure mode."""
+    Round 4 item 2 restricts the search space a SECOND time, the same way:
+    once a seed vertex is picked, every vertex outside its
+    `_FIGURE_HOP_RADIUS`-hop ball is ALSO banned before farthest-point
+    spread runs, so anchors are chosen from (and paths stay within) a
+    compact local neighborhood instead of the whole graph -- "snakey"
+    became "constellationy" by shrinking the search space, not by
+    changing the search itself. If the (doubly) restricted graph leaves
+    too little connected, unoccupied ground for `k` anchors, this returns
+    None -- THAT is the real failure mode, for both restrictions."""
     is_grand, draw_dur, hold_dur, _ = _hash_timing(track, slot)
     lo, hi = (
         (_GRAND_MIN_ANCHORS, _GRAND_MAX_ANCHORS)
@@ -632,6 +891,19 @@ def _build_figure(
             break
     if v0 < 0:
         return None  # every vertex is occupied by an earlier figure
+
+    # Round 4 item 2: shrink the search space to a compact local
+    # neighborhood BEFORE picking any more anchors. Radius (not diameter)
+    # from a single seed: any two vertices within _FIGURE_HOP_RADIUS hops
+    # of v0 are within 2*_FIGURE_HOP_RADIUS hops of EACH OTHER (triangle
+    # inequality), which is the actual constraint asked for ("max
+    # pairwise hop distance across the whole figure"), not just
+    # seed-to-anchor distance.
+    hop = _bfs_hops(adj, g.n_vertices, v0)
+    out_of_ball = frozenset(
+        int(v) for v in range(g.n_vertices) if not (hop[v] <= _FIGURE_HOP_RADIUS)
+    )
+    adj = _restrict_adj(adj, frozenset(), out_of_ball)
 
     anchors = [v0]
     mindist: Optional[np.ndarray] = None
@@ -688,6 +960,24 @@ def _build_figure(
     s = np.concatenate(s_list)
     length = s0
 
+    # Round 4: compact figures (the hop-radius restriction above) make it
+    # common for the shortest paths of TWO DIFFERENT anchor pairs to reuse
+    # the same edge -- a small local subgraph has few distinct routes
+    # between nearby points, unlike the old whole-graph spread. render()
+    # scatter-ADDS (np.add.at) each row's line/head weight by its
+    # position in `rows`; a row appearing twice got that weight added
+    # TWICE, which the harness caught as a real cap violation (0.2650
+    # L/frame on the star, cap 0.24, at a light whose path row repeated
+    # verbatim at the same arclength). Keep each row's FIRST occurrence
+    # only, in original (arclength-ascending) order -- a light the path
+    # geometrically revisits later just doesn't re-illuminate the second
+    # time; its glow from the first pass, still governed by the normal
+    # attack/hold/fade envelope, already covers it, so nothing pops.
+    _, first_idx = np.unique(rows, return_index=True)
+    first_idx = np.sort(first_idx)
+    rows = rows[first_idx]
+    s = s[first_idx]
+
     # Round 3 item 1: a gradient palette family instead of one hue -- a
     # hashed (hue0, hue1) pair, a small hashed rotation of both ends
     # together (keeps the family's span, varies its footing), and a
@@ -710,21 +1000,37 @@ def _build_figure(
     # draw_dur/hold_dur/is_grand were already hashed by _hash_timing above
     # (round 3 needs them before the graph work, to size the exclusion
     # window). Draw duration is hashed directly rather than derived from
-    # length / (factor * unit): a unit-scaled spark speed saturates a
-    # fixed draw-duration clamp on the 6,660-light star (mean path ~1466
-    # units, unit ~22 -> nominal ~41s) while landing in-range unclamped
-    # on the 288-light hex demo (mean path ~1245, unit ~150 -> nominal
-    # ~5.4s) -- the two graphs' hop-count-vs-unit-size ratios differ too
-    # much for one scale factor. Hashing draw_dur directly keeps the pace
-    # comparable across geometries; the head/meteor sigma is instead
-    # solved from whatever speed that pace implies (see _slew_safe_sigma).
+    # length / (factor * unit): even after round 4's compact-figure
+    # restriction shrank both graphs' mean path length (star: ~289 units
+    # now vs ~1466 before, unit ~22; hex: ~1205 vs ~1245 before, unit
+    # ~150 -- the hex demo's small vertex count means the hop-radius ball
+    # barely constrains it further, so its scale barely moved), the two
+    # graphs' hop-count-vs-unit-size ratios still differ too much for one
+    # scale factor to cover both without clamping one of them. Hashing
+    # draw_dur directly keeps the pace comparable across geometries; the
+    # head/meteor sigma is instead solved from whatever speed that pace
+    # implies (see _slew_safe_sigma).
     speed = length / draw_dur if draw_dur > 0 else 0.0
     head_sigma = _slew_safe_sigma(g.unit, _HEAD_L, speed)
 
+    # Round 4: anchor twinkle speed/brightness/temperature, each hashed
+    # per anchor as center +/- variance (see the ON-PLAYA TUNING block at
+    # the top of the file). All four arrays precomputed once here, never
+    # re-hashed per frame.
     n_anchor = len(anchor_s_list)
-    atw = seeded_random(f"constellations-atw-{track}-{slot}", 2 * n_anchor)
-    anchor_freq = _ANCHOR_TWINKLE_HZ_MIN + _ANCHOR_TWINKLE_HZ_RANGE * atw[:n_anchor]
-    anchor_phase = atw[n_anchor:]
+    atw = seeded_random(f"constellations-atw-{track}-{slot}", 4 * n_anchor)
+    anchor_freq = _ANCHOR_TWINKLE_HZ * (
+        1.0 + _ANCHOR_TWINKLE_HZ_VARIANCE * (2.0 * atw[:n_anchor] - 1.0)
+    )
+    anchor_phase = atw[n_anchor : 2 * n_anchor]
+    anchor_bright = _ANCHOR_TWINKLE_BRIGHTNESS * (
+        1.0
+        + _ANCHOR_TWINKLE_BRIGHTNESS_VARIANCE
+        * (2.0 * atw[2 * n_anchor : 3 * n_anchor] - 1.0)
+    )
+    anchor_temp = _ANCHOR_TWINKLE_TEMP + _ANCHOR_TWINKLE_TEMP_VARIANCE * (
+        2.0 * atw[3 * n_anchor : 4 * n_anchor] - 1.0
+    )
 
     return _Figure(
         rows,
@@ -744,6 +1050,8 @@ def _build_figure(
         frozenset(vertex_set),
         anchor_freq,
         anchor_phase,
+        anchor_bright,
+        anchor_temp,
     )
 
 
@@ -821,10 +1129,23 @@ class _Sky:
     def __init__(self, n: int):
         pick = seeded_random("constellations-star-pick", n)
         self.is_twinkle = pick < _TWINKLE_FRACTION
-        self.period = _TWINKLE_PERIOD_MIN + _TWINKLE_PERIOD_RANGE * seeded_random(
-            "constellations-star-period", n
+        # Round 4: speed/brightness/temperature, each center +/- a hashed
+        # per-star variance, per the ON-PLAYA TUNING block at the top of
+        # this file.
+        self.hz = _SKY_TWINKLE_HZ * (
+            1.0
+            + _SKY_TWINKLE_HZ_VARIANCE
+            * (2.0 * seeded_random("constellations-star-hz", n) - 1.0)
         )
         self.phase = seeded_random("constellations-star-phase", n)
+        self.bright = _SKY_TWINKLE_BRIGHTNESS * (
+            1.0
+            + _SKY_TWINKLE_BRIGHTNESS_VARIANCE
+            * (2.0 * seeded_random("constellations-star-bright", n) - 1.0)
+        )
+        self.temp = _SKY_TWINKLE_TEMP + _SKY_TWINKLE_TEMP_VARIANCE * (
+            2.0 * seeded_random("constellations-star-temp", n) - 1.0
+        )
         self.twinkle_hue = 200.0 + 40.0 * seeded_random("constellations-star-hue", n)
 
         target_k = int(np.clip(round(n * 0.0015), 4, 14))
@@ -976,8 +1297,11 @@ class ConstellationsPattern(Pattern):
         # --- sky: near-black floor, hashed twinkle, a fainter/denser
         # background tier under it, steady named stars on top ---
         bg_hue_drift = (248.0 + 9.0 * np.sin(2.0 * np.pi * t / 67.0)) % 360.0
-        twinkle = 0.5 + 0.5 * np.sin(2.0 * np.pi * (t / sky.period + sky.phase))
-        twinkle_l = _FLOOR_L + 0.24 * twinkle**2
+        # Round 4: per-star hashed speed (sky.hz) and brightness (sky.bright)
+        # replace round 3's fixed period/amplitude -- see the ON-PLAYA
+        # TUNING block at the top of the file.
+        twinkle = 0.5 + 0.5 * np.sin(2.0 * np.pi * (sky.hz * t + sky.phase))
+        twinkle_l = _FLOOR_L + sky.bright * twinkle**2
         bg2_twinkle = 0.5 + 0.5 * np.sin(
             2.0 * np.pi * (t / sky.bg_period + sky.bg_phase)
         )
@@ -1002,12 +1326,26 @@ class ConstellationsPattern(Pattern):
             sky.named_hue,
             np.where(sky.is_twinkle, sky.twinkle_hue, bg_hue_drift),
         )
+        a_bg = bg_c * np.cos(np.radians(bg_h))
+        b_bg = bg_c * np.sin(np.radians(bg_h))
+
+        # Round 4 item 1: color temperature -- a signed OKLab vector
+        # ADDITION (never a hue lerp) at each twinkle star's own peak,
+        # magnitude tied to the SAME `twinkle` position that drives its
+        # brightness (so it fades in/out with the brightness envelope,
+        # never popping on its own). Sky-only; named/bg tiers are
+        # untouched by this knob.
+        temp_axis_a = np.cos(np.radians(_TEMP_WARM_HUE))
+        temp_axis_b = np.sin(np.radians(_TEMP_WARM_HUE))
+        temp_shift = np.where(sky.is_twinkle, sky.temp * twinkle, 0.0)
+        a_bg = a_bg + temp_shift * temp_axis_a
+        b_bg = b_bg + temp_shift * temp_axis_b
 
         if graph is None or n_tracks <= 0:
             out = np.zeros((n, 3))
             out[:, 0] = np.clip(bg_l, 0.0, 1.0)
-            out[:, 1] = np.clip(bg_c, 0.0, 0.4)
-            out[:, 2] = bg_h % 360.0
+            out[:, 1] = np.clip(np.hypot(a_bg, b_bg), 0.0, 0.4)
+            out[:, 2] = np.degrees(np.arctan2(b_bg, a_bg)) % 360.0
             return np.nan_to_num(out)
 
         w_total = np.zeros(n)
@@ -1171,24 +1509,25 @@ class ConstellationsPattern(Pattern):
                             )
                             anchor_env = fade * float(_smoothstep(hold_u, 0.0, 0.3))
                             if anchor_env > 0.0:
-                                # round 3 item 4: fast (2-4 Hz, per-anchor
-                                # hashed) small-amplitude twinkle, gated by
-                                # the same anchor_env so it fades in/out
-                                # with the hold rather than popping; its
-                                # chroma contribution is damped in lockstep
-                                # so the anchor visibly whitens at each
-                                # twinkle peak (brighter AND whiter tied
-                                # together, not independent knobs).
+                                # round 3 item 4 (speed/brightness/temp now
+                                # hashed PER ANCHOR, round 4 -- see the
+                                # ON-PLAYA TUNING block at the top of the
+                                # file): fast small-amplitude twinkle,
+                                # gated by the same anchor_env so it fades
+                                # in/out with the hold rather than popping;
+                                # its chroma contribution is damped in
+                                # lockstep with fig.anchor_temp so the
+                                # anchor visibly whitens at each twinkle
+                                # peak (brighter AND whiter tied together,
+                                # not independent knobs).
                                 tw_osc = np.sin(
                                     2.0
                                     * np.pi
                                     * (fig.anchor_freq * age + fig.anchor_phase)
                                 )
                                 tw_pos = 0.5 + 0.5 * tw_osc
-                                l_tw = _ANCHOR_TWINKLE_AMP_L * tw_pos * anchor_env
-                                c_mult = (
-                                    1.0 - _ANCHOR_TWINKLE_DESAT * tw_pos * anchor_env
-                                )
+                                l_tw = fig.anchor_bright * tw_pos * anchor_env
+                                c_mult = 1.0 - fig.anchor_temp * tw_pos * anchor_env
                                 boost_l = (
                                     _ANCHOR_HOLD_BOOST_L + breathe
                                 ) * anchor_env + l_tw
@@ -1293,8 +1632,6 @@ class ConstellationsPattern(Pattern):
         fig_a = aw / w_safe
         fig_b = bw / w_safe
 
-        a_bg = bg_c * np.cos(np.radians(bg_h))
-        b_bg = bg_c * np.sin(np.radians(bg_h))
         a = a_bg * (1.0 - blend) + fig_a * blend + extra_a
         b = b_bg * (1.0 - blend) + fig_b * blend + extra_b
         l = bg_l * (1.0 - blend) + fig_l * blend + extra_l
