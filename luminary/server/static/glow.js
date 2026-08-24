@@ -239,18 +239,19 @@ export class GlowRenderer {
     this.texW = 0;
     this.texH = 0;
     // PSF parameters, physical inches / linear gains. Calibrated against the
-    // 2024 panel photo (bright beady rims, glow decaying toward a dimmer
-    // cell center, faint spill outside the pipes).
+    // 2024 panel photo, then hand-tuned against the live render (bright
+    // beady rims, glow decaying toward a dimmer cell center, faint spill
+    // outside the pipes).
     this.params = {
-      standoffIn: 1.0, // LED-to-cloth height: sets grazing falloff
-      sigmaIn: 0.8, // bead width
+      standoffIn: 2.0, // LED-to-cloth height: sets grazing falloff
+      sigmaIn: 0.7, // bead width
       lobeM: 2.0, // forward exponent: LED cosine x grazing incidence
-      rangeIn: 38.0, // throw fade-out radius
-      spillRangeIn: 15.0, // spill: faint rim just past the pipe, then gone
-      beadGain: 10.0,
-      throwGain: 5.0,
-      spillGain: 0.4,
-      exposure: 0.1,
+      rangeIn: 17.0, // throw fade-out radius
+      spillRangeIn: 12.0, // spill: faint rim just past the pipe, then gone
+      beadGain: 7.6,
+      throwGain: 3.2,
+      spillGain: 3.0,
+      exposure: 0.09,
       bg: [0.00518, 0.00518, 0.007], // #101014 sRGB-decoded to linear
     };
     this.ok = true;
