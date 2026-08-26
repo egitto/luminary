@@ -117,15 +117,30 @@ python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \
     --at 60 --span 30 -o sheet.jpg
 
 python3 scripts/capture.py still --pattern aurora --at 150.75 -o shot.png
-python3 scripts/capture.py clip  --pattern life --at 55 --span 30 -o clip.webm
+python3 scripts/capture.py clip  --pattern life --lights pentagon-4A-37 \
+    --at 55 --span 30 -o clip.webm
 ```
+
+A pattern you just wrote is not on a server that is already running — the
+registry is built at start (see above). Upload it instead of restarting:
+
+```bash
+curl -F "file=@patterns/my_pattern.py" http://127.0.0.1:8080/api/patterns
+python3 scripts/capture.py sheet --pattern my_pattern --span 10 -o out.jpg
+```
+
+That is the whole edit-and-look loop, and it costs one round trip rather than
+a server boot. `POST /api/patterns` hot-reloads the registry and reports load
+errors as JSON, so a pattern that fails to import says why instead of going
+missing.
 
 `sheet` is for whoever is iterating: N frames across a span, tiled and
 labelled, each its own keyframe, so sampling an hour of a pattern costs what
 sampling a second does. `clip` is for whoever is deciding — motion is the one
 thing a grid cannot show — and writes both a small copy to send and a
-full-resolution master beside it. Every mode prints duplicate fraction and
-per-frame motion, so a capture can be judged without opening it.
+full-resolution master beside it. Both print duplicate fraction and per-frame
+motion, so a capture can be judged without opening it (a `still` is one frame
+and has none to give).
 
 **The full contributor guide is [`patterns/README.md`](patterns/README.md)**:
 the contract, the lights-array columns, statelessness idioms for events and

@@ -28,7 +28,8 @@ These serve two different readers, and neither substitutes for the other.
     python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \
         --at 60 --span 30 -o sheet.jpg
     python3 scripts/capture.py still --pattern aurora --at 150.75 -o shot.png
-    python3 scripts/capture.py clip  --pattern life --at 55 --span 30 -o clip.webm
+    python3 scripts/capture.py clip  --pattern life --lights pentagon-4A-37 \
+        --at 55 --span 30 -o clip.webm
 
 What each output is faithful to differs, and the difference matters:
 
