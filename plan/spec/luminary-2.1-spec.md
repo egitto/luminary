@@ -1004,6 +1004,21 @@ client → its own keyframe (cheap, stateless engine). 12.3.3 Receives resync
 requests over the socket. 12.3.4 This driver is the live half of the web API's
 `/api/play` endpoint (§15.4).
 
+12.3.5 `{"type": "step", "t": <seconds>}` emits exactly one frame at that `t`
+and sets `paused`. The paced loop derives `t` from `frame_index / fps` against
+wall clock and cannot seek, so a consumer slower than real time can only drop
+frames; stepping lets one that renders at any speed still see every frame.
+This is sound because patterns are pure functions of `(lights, t)` (§9.1.3):
+a frame at an arbitrary `t` is the frame the clock would have produced on
+arrival.
+
+12.3.7 `Engine.frame()` builds its whole frame list synchronously, so a step
+can never corrupt encoder state or interleave *within* a frame. Across frames
+it can: `paused` cannot interrupt a send already awaiting between controllers,
+so a step issued without a prior `pause` may put one torn frame on the wire.
+Each controller's messages stay ordered and the decoder's final state stays
+correct, but one displayed frame may be half old and half new.
+
 ### 12.4 Multi-consumer note
 
 12.4.1 Because frames are pure bytes derived from `t`, one engine can feed serial
