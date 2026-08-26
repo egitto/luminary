@@ -104,6 +104,29 @@ only on `(lights, t)`; use `luminary.patterns.util.seeded_random` for
 per-entity constants. Files in `patterns/` are discovered on server start
 (and on any `POST /api/patterns` upload, which hot-reloads the registry).
 
+### Seeing what it looks like
+
+`scripts/capture.py` shoots the live web client with a headless browser, so
+what comes back is the real path — engine, codec, WebSocket, JS decoder,
+cloth-glow canvas — not a re-render. It needs a server up
+(`python -m luminary.cli serve --seed-demo`) and no GPU.
+
+```bash
+# the whole arc of a pattern in one labelled image — start here while writing
+python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \
+    --at 60 --span 30 -o sheet.jpg
+
+python3 scripts/capture.py still --pattern aurora --at 150.75 -o shot.png
+python3 scripts/capture.py clip  --pattern life --at 55 --span 30 -o clip.webm
+```
+
+`sheet` is for whoever is iterating: N frames across a span, tiled and
+labelled, each its own keyframe, so sampling an hour of a pattern costs what
+sampling a second does. `clip` is for whoever is deciding — motion is the one
+thing a grid cannot show — and writes both a small copy to send and a
+full-resolution master beside it. Every mode prints duplicate fraction and
+per-frame motion, so a capture can be judged without opening it.
+
 **The full contributor guide is [`patterns/README.md`](patterns/README.md)**:
 the contract, the lights-array columns, statelessness idioms for events and
 randomness, craft notes for the physical medium (gamut, scale, motion, wire
