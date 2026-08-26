@@ -1012,7 +1012,7 @@ This is sound because patterns are pure functions of `(lights, t)` (§9.1.3):
 a frame at an arbitrary `t` is the frame the clock would have produced on
 arrival.
 
-12.3.7 `Engine.frame()` builds its whole frame list synchronously, so a step
+12.3.6 `Engine.frame()` builds its whole frame list synchronously, so a step
 can never corrupt encoder state or interleave *within* a frame. Across frames
 it can: `paused` cannot interrupt a send already awaiting between controllers,
 so a step issued without a prior `pause` may put one torn frame on the wire.

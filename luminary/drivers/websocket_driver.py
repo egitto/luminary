@@ -98,8 +98,12 @@ class WebSocketSession:
                     t = float(control["t"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                # Pause first: the paced loop and this one share the socket,
-                # and two senders would interleave frames mid-stream.
+                # Stop the paced loop advancing, so the next thing on the
+                # wire is this frame and not the clock's. It does NOT make the
+                # socket safe: a send already awaiting between controllers
+                # runs to completion, so a step arriving mid-frame can still
+                # tear one frame (spec §12.3.6). Pause before stepping to
+                # avoid that; a capture harness does.
                 self.paused = True
                 for frame in self.engine.frame(t):
                     await self.websocket.send_bytes(frame)
