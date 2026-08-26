@@ -38,8 +38,8 @@ What each output is faithful to differs, and the difference matters:
     deltas -- and every artifact the installation would show -- is the real
     one. The rate is read off the socket, never passed in.
 
-Every mode prints frame statistics, so a capture can be judged without opening
-it. Video mode also writes a full-resolution master beside the small copy,
+`sheet` and `clip` print frame statistics, so a capture can be judged without
+opening it (a `still` is one frame and has none to give). Video mode also writes a full-resolution master beside the small copy,
 named `<stem>_full_size_send_only_if_asked.<ext>` -- the label is the point, on
 a metered link the master should never be the thing casually attached.
 
@@ -63,26 +63,27 @@ from typing import Any, Callable, List, Sequence
 import numpy as np
 from playwright.sync_api import sync_playwright
 
+# This container's browser install has a layout Playwright's own resolver
+# misses, so this pin is a workaround for that and nothing more -- anywhere
+# else, Playwright finds its own chromium and this path simply will not exist.
 CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 # Headless chromium has no GPU; ANGLE over SwiftShader gives it real WebGL2.
 GL_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-# Playwright's bundled ffmpeg can only do VP8 and has no fps filter; it is the
-# fallback so a fresh clone can still cut a clip without another install.
-PW_FFMPEG = "/opt/pw-browsers/ffmpeg-1011/ffmpeg-linux"
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 
 # --------------------------------------------------------------------- tooling
 
 
-def find_ffmpeg() -> tuple[str, bool]:
-    """(path, is_full_build). The bundled build cannot do VP9 or filters."""
+def find_ffmpeg() -> str:
+    """Only `sheet` and `clip` call this; `still` needs no ffmpeg at all."""
     system = shutil.which("ffmpeg")
     if system:
-        return system, True
-    if Path(PW_FFMPEG).exists():
-        return PW_FFMPEG, False
-    raise SystemExit("no ffmpeg: install one, or `playwright install ffmpeg`")
+        return system
+    raise SystemExit(
+        "sheet and clip need ffmpeg on PATH (with libvpx-vp9 and drawtext). "
+        "`still` works without it."
+    )
 
 
 def probe_size(ffmpeg: str, path: Path) -> tuple[int, int]:
@@ -104,25 +105,70 @@ def probe_size(ffmpeg: str, path: Path) -> tuple[int, int]:
 
 def open_page(pw: Any, a: Any) -> tuple[Any, Any, tuple[str, str]]:
     """A browser on the live UI, played, with the glow render confirmed up."""
-    browser = pw.chromium.launch(executable_path=CHROME, args=GL_ARGS)
+    launch: dict[str, Any] = {"args": GL_ARGS}
+    if Path(CHROME).exists():
+        launch["executable_path"] = CHROME
+    try:
+        browser = pw.chromium.launch(**launch)
+    except Exception as exc:
+        raise SystemExit(
+            f"could not start chromium: {exc}\nTry `playwright install chromium`."
+        ) from exc
     context = browser.new_context(
         viewport={"width": a.width, "height": a.height}, device_scale_factor=1
     )
     page = context.new_page()
-    page.goto(f"http://127.0.0.1:{a.port}/", wait_until="networkidle")
+    try:
+        page.goto(f"http://127.0.0.1:{a.port}/", wait_until="networkidle")
+    except Exception as exc:
+        browser.close()
+        raise SystemExit(
+            f"no server on port {a.port}: {type(exc).__name__}. Start one with "
+            "`python -m luminary.cli serve --seed-demo`."
+        ) from exc
     page.wait_for_function(
         "() => document.getElementById('pattern').options.length > 0"
     )
 
     def pick(sel_id: str, want: str) -> str:
+        """Resolve a name to one option, or refuse.
+
+        Exactness first, and ambiguity is fatal. The old order -- first option
+        whose value matched OR whose label merely contained the string -- let
+        `--pattern wave` select `ripple` (its description reads "circular
+        waves") and write it to wave.png. Capturing a different pattern than
+        the one named is worse than any error message: everything downstream
+        is of the wrong thing and the only tell is one word in a printed label.
+        """
         opts = page.eval_on_selector_all(
             f"#{sel_id} option", "os => os.map(o => [o.value, o.textContent])"
         )
-        for value, label in opts:
-            if want == value or want.lower() in label.lower():
-                page.select_option(f"#{sel_id}", value)
-                return str(label)
-        raise SystemExit(f"no #{sel_id} option matching {want!r}; have: {opts}")
+        exact = [(v, l) for v, l in opts if want == v]
+        if not exact:
+            exact = [
+                (v, l)
+                for v, l in opts
+                if want.lower() == l.split(" \u2014 ")[0].lower()
+            ]
+        loose = exact or [(v, l) for v, l in opts if want.lower() in l.lower()]
+        if not loose:
+            names = ", ".join(sorted(v for v, _ in opts))
+            raise SystemExit(f"no #{sel_id} option matching {want!r}. have: {names}")
+        if len({l for _, l in loose}) > 1:
+            hits = ", ".join(f"{v} ({l})" for v, l in loose)
+            raise SystemExit(
+                f"{want!r} matches {len(loose)} different #{sel_id} options: "
+                f"{hits}. Name one exactly."
+            )
+        if len(loose) > 1:
+            # Same label, different ids -- the store seeded the same geometry
+            # twice. The user cannot tell them apart and neither can the
+            # capture, so picking one is honest as long as it is said out loud.
+            print(
+                f"  ({len(loose)} entries named {loose[0][1]!r}; using {loose[0][0]})"
+            )
+        page.select_option(f"#{sel_id}", loose[0][0])
+        return str(loose[0][1])
 
     labels = (pick("lights", a.lights), pick("pattern", a.pattern))
     # Drop the chrome after the selects are set (they live in the header) but
@@ -327,6 +373,21 @@ def clip_frames(a: Any, out_dir: Path) -> tuple[int, float, tuple[str, str]]:
         browser.close()
 
     every = max(1, round(rate / a.fps))
+    # Keeping one frame in `every` and then encoding at --fps only tells the
+    # truth when the two agree. At 20 fps off a 30 fps wire, every=2 keeps 15
+    # frames a second and plays them at 20: a 4 s span becomes a 3 s clip
+    # running 1.33x fast, silently. Refuse instead of lying about the speed.
+    exact = rate / every
+    if abs(exact - a.fps) > 1e-6:
+        usable = ", ".join(
+            f"{rate / k:g}"
+            for k in range(1, int(rate) + 1)
+            if float(rate / k).is_integer()
+        )
+        raise SystemExit(
+            f"--fps {a.fps:g} does not divide the {rate:g} fps wire: the clip would "
+            f"play {a.fps / exact:.2f}x speed. Usable rates here: {usable}"
+        )
     total = int(round(a.span * rate)) // every
     if total < 1:
         raise SystemExit(f"--span {a.span} at {a.fps} fps is less than one frame")
@@ -431,11 +492,14 @@ def contact_sheet(
     cols = min(a.cols, len(times))
     rows = math.ceil(len(times) / cols)
     pad = 6
+    if not Path(FONT).exists():
+        print(f"  (no font at {FONT} — tiles go out unlabelled)")
     stamps = ",".join(
         f"drawtext=fontfile={FONT}:text='{t:.2f}s'"
         f":x={(i % cols) * (cw + pad) + 10}:y={(i // cols) * (ch + pad) + 8}"
         f":fontsize=20:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=5"
         for i, t in enumerate(times)
+        if Path(FONT).exists()
     )
     subprocess.run(
         [
@@ -447,7 +511,8 @@ def contact_sheet(
             "-i",
             str(frames / f"f%05d.{ext}"),
             "-vf",
-            f"scale={cw}:{ch},tile={cols}x{rows}:padding={pad}:color=#0b0b0b,{stamps}",
+            f"scale={cw}:{ch},tile={cols}x{rows}:padding={pad}:color=#0b0b0b"
+            + (f",{stamps}" if stamps else ""),
             "-frames:v",
             "1",
             "-q:v",
@@ -574,12 +639,15 @@ def main() -> int:
     clip.add_argument("--keep-frames", action="store_true")
 
     a = ap.parse_args()
-    ffmpeg, full = find_ffmpeg()
-    if not full and a.mode != "still":
-        raise SystemExit("sheet and clip need a full ffmpeg build; install one")
+    ffmpeg = "" if a.mode == "still" else find_ffmpeg()
     ext = "jpg" if a.format == "jpeg" else "png"
-    work = a.out.parent / f".capture-{a.out.stem}"
     a.out.parent.mkdir(parents=True, exist_ok=True)
+    # Clear, not just create. Frames are read back as f%05d, so a shorter run
+    # into the same output would splice the tail of a longer one onto its own
+    # and exit 0 -- and the run that leaves a directory behind is the one that
+    # crashed, which makes the retry the corrupted one.
+    work = a.out.parent / f".capture-{a.out.stem}"
+    shutil.rmtree(work, ignore_errors=True)
 
     if a.mode == "clip":
         n, rate, labels = clip_frames(a, work)
