@@ -104,6 +104,21 @@ only on `(lights, t)`; use `luminary.patterns.util.seeded_random` for
 per-entity constants. Files in `patterns/` are discovered on server start
 (and on any `POST /api/patterns` upload, which hot-reloads the registry).
 
+### Seeing what it looks like
+
+`scripts/capture.py` shoots the live web client headless, so the pixels come
+through the real path (engine → codec → WebSocket → JS decoder → cloth-glow
+canvas). Restart the server first if you just wrote the pattern — the registry
+is built at boot. Then, e.g.:
+
+```bash
+python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \
+    --at 60 --span 30 -o sheet.jpg    # the arc of a pattern, one image
+```
+
+`sheet`, `still` and `clip`, when to use which, and the rest of the options:
+`python3 scripts/capture.py --help` (and `<mode> --help`).
+
 **The full contributor guide is [`patterns/README.md`](patterns/README.md)**:
 the contract, the lights-array columns, statelessness idioms for events and
 randomness, craft notes for the physical medium (gamut, scale, motion, wire

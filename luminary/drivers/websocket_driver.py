@@ -2,7 +2,13 @@
 
 The session sends SESSION frames then paces KEYFRAME/DELTA binary messages —
 byte-identical to what the serial path writes (spec §2.1.2). Inbound JSON
-control messages: {"type": "resync" | "set_pattern" | "pause" | "resume"}.
+control messages: {"type": "resync" | "set_pattern" | "pause" | "resume"} and
+{"type": "step", "t": <seconds>}, which emits exactly one frame at that t and
+pauses the paced loop. Stepping is what makes offline capture possible: the
+paced loop ties t to wall clock with no way to seek, so a renderer slower than
+real time can only ever drop frames. Patterns are pure functions of (lights, t)
+(spec §9.1.3), so a frame at an arbitrary t is as valid as one the clock
+reached on its own.
 
 The driver is framework-thin: it talks to any object with async
 ``send_bytes``/``receive`` in the Starlette WebSocket shape, and holds no
@@ -87,6 +93,20 @@ class WebSocketSession:
                 self.paused = True
             elif kind == "resume":
                 self.paused = False
+            elif kind == "step":
+                try:
+                    t = float(control["t"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                # Stop the paced loop advancing, so the next thing on the
+                # wire is this frame and not the clock's. It does NOT make the
+                # socket safe: a send already awaiting between controllers
+                # runs to completion, so a step arriving mid-frame can still
+                # tear one frame (spec §12.3.6). Pause before stepping to
+                # avoid that; a capture harness does.
+                self.paused = True
+                for frame in self.engine.frame(t):
+                    await self.websocket.send_bytes(frame)
             elif kind == "set_pattern" and self.resolve_pattern is not None:
                 try:
                     pattern = self.resolve_pattern(str(control.get("name")))

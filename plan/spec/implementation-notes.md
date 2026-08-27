@@ -26,7 +26,7 @@
 | `luminary/comms/codec.py` | §11.6–§11.8 | `Encoder` (error-ranked budgeted deltas, keyframe cadence, per-controller frames) and the reference `Decoder` |
 | `luminary/engine/engine.py` | §10 | `lights + pattern + t → wire frames`; the single pipeline assembly point; `colors_srgb8` for static renders |
 | `luminary/drivers/serial_driver.py` | §12.2 | One process, one engine, port-per-controller; baud-derived budgets; HELLO/RESYNC |
-| `luminary/drivers/websocket_driver.py` | §12.3 | Same bytes over WS; JSON control inbound (resync / set_pattern / pause / resume) |
+| `luminary/drivers/websocket_driver.py` | §12.3 | Same bytes over WS; JSON control inbound (resync / set_pattern / pause / resume / step) |
 | `luminary/render/projection.py` | §14.4 | Shared world→2D layout for SVG **and** canvas (one projection rule) |
 | `luminary/render/svg.py` | §14.5 | Static SVG of scaffolds / lights (rendered once, never per frame) |
 | `luminary/server/app.py`, `store.py` | §15 | FastAPI adapter (all exit-condition endpoints) over a content-addressed file store |

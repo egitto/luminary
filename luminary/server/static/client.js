@@ -30,6 +30,13 @@ class Client {
     this.frames = 0;
     this.windowStart = performance.now();
     this.needsPaint = false;
+    // Monotonic count of applied wire frames — the signal a capture tool waits
+    // on after a step. `frames` below cannot serve: updateStats() zeroes it
+    // every 500 ms to compute a rate.
+    this.applied = 0;
+    // Capture mode stops the live-tuning repaint (see paintLoop) and lets a
+    // capture tool drive paint() itself, one wire frame at a time.
+    this.captureMode = false;
 
     // Realistic cloth render (2D view): WebGL2 splatting on a canvas layered
     // *under* this one; seams/scaffold/clicks stay on the 2D canvas on top.
@@ -95,7 +102,10 @@ class Client {
       this.bytes += bytes.length;
       const applied = this.decoder.feed(bytes);
       for (const frame of applied) {
-        if (frame.type !== FRAME_SESSION) this.frames++;
+        if (frame.type !== FRAME_SESSION) {
+          this.frames++;
+          this.applied++;
+        }
         this.needsPaint = true;
         this.glowColorsStale = true;
       }
@@ -416,8 +426,11 @@ class Client {
 
   paintLoop() {
     // Realistic mode repaints every frame (~0.2 ms): glow.params stays
-    // live-tunable from the console even when the stream is paused.
-    if (this.renderMode === "realistic" && this.glow && this.draws)
+    // live-tunable from the console even when the stream is paused. That is
+    // ~0.2 ms on a GPU; under software rendering it re-renders the identical
+    // frame until rAF stretches to hundreds of ms, which is why capture mode
+    // turns it off and paints on demand instead.
+    if (!this.captureMode && this.renderMode === "realistic" && this.glow && this.draws)
       this.needsPaint = true;
     if (this.needsPaint && !document.hidden) {
       this.needsPaint = false;
