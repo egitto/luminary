@@ -106,41 +106,18 @@ per-entity constants. Files in `patterns/` are discovered on server start
 
 ### Seeing what it looks like
 
-`scripts/capture.py` shoots the live web client with a headless browser, so
-what comes back is the real path — engine, codec, WebSocket, JS decoder,
-cloth-glow canvas — not a re-render. It needs a server up
-(`python -m luminary.cli serve --seed-demo`) and no GPU.
+`scripts/capture.py` shoots the live web client headless, so the pixels come
+through the real path (engine → codec → WebSocket → JS decoder → cloth-glow
+canvas). Restart the server first if you just wrote the pattern — the registry
+is built at boot. Then, e.g.:
 
 ```bash
-# the whole arc of a pattern in one labelled image — start here while writing
 python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \
-    --at 60 --span 30 -o sheet.jpg
-
-python3 scripts/capture.py still --pattern aurora --at 150.75 -o shot.png
-python3 scripts/capture.py clip  --pattern life --lights pentagon-4A-37 \
-    --at 55 --span 30 -o clip.webm
+    --at 60 --span 30 -o sheet.jpg    # the arc of a pattern, one image
 ```
 
-A pattern you just wrote is not on a server that is already running — the
-registry is built at start (see above). Upload it instead of restarting:
-
-```bash
-curl -F "file=@patterns/my_pattern.py" http://127.0.0.1:8080/api/patterns
-python3 scripts/capture.py sheet --pattern my_pattern --span 10 -o out.jpg
-```
-
-That is the whole edit-and-look loop, and it costs one round trip rather than
-a server boot. `POST /api/patterns` hot-reloads the registry and reports load
-errors as JSON, so a pattern that fails to import says why instead of going
-missing.
-
-`sheet` is for whoever is iterating: N frames across a span, tiled and
-labelled, each its own keyframe, so sampling an hour of a pattern costs what
-sampling a second does. `clip` is for whoever is deciding — motion is the one
-thing a grid cannot show — and writes both a small copy to send and a
-full-resolution master beside it. Both print duplicate fraction and per-frame
-motion, so a capture can be judged without opening it (a `still` is one frame
-and has none to give).
+`sheet`, `still` and `clip`, when to use which, and the rest of the options:
+`python3 scripts/capture.py --help` (and `<mode> --help`).
 
 **The full contributor guide is [`patterns/README.md`](patterns/README.md)**:
 the contract, the lights-array columns, statelessness idioms for events and

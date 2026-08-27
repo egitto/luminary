@@ -6,45 +6,15 @@ path: engine -> codec -> WebSocket -> JS decoder -> canvas. Defaults to the
 cloth-glow render and refuses to shoot if WebGL2 did not come up, because the
 client's fallback to flat cells is silent and looks like a legitimate frame.
 
-Three outputs, because two different questions get asked of a pattern:
+Three modes -- `sheet`, `still`, `clip`. Which to use, and why the fidelity
+differs between them, is in `--help` (HELP below); this docstring deliberately
+does not repeat it, because the two copies drifted the first time.
 
-    sheet   N frames across a span, tiled into ONE labelled image
-    still   one frame at an exact t
-    clip    a video
-
-These serve two different readers, and neither substitutes for the other.
-
-  * `sheet` is for whoever is *iterating* -- typically an agent in a cloud
-    worker, which cannot watch a video at all. One file, one look, the whole
-    arc of the pattern, and cheap: each tile is its own keyframe rather than a
-    point in a delta chain, so sampling an hour costs what sampling a second
-    does. This is the default reach while a pattern is being written.
-  * `clip` is for whoever is *deciding* -- a human watching a pattern move
-    before merging it. Motion is the thing being judged and a grid cannot show
-    it. The send copy is kept small because it has to cross a metered playa
-    link to reach them; the full-resolution master stays where it was made
-    unless someone asks for it.
-
-    python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \
-        --at 60 --span 30 -o sheet.jpg
-    python3 scripts/capture.py still --pattern aurora --at 150.75 -o shot.png
-    python3 scripts/capture.py clip  --pattern life --lights pentagon-4A-37 \
-        --at 55 --span 30 -o clip.webm
-
-What each output is faithful to differs, and the difference matters:
-
-  * `sheet` and `still` resync before every frame, so each is a keyframe: the
-    pattern's ground truth at that t, with no delta history behind it.
-  * `clip` steps the codec at the server's own frame rate, so the chain of
-    deltas -- and every artifact the installation would show -- is the real
-    one. The rate is read off the socket, never passed in.
-
-`sheet` and `clip` print frame statistics, so a capture can be judged without
-opening it (a `still` is one frame and has none to give). Video mode also writes a full-resolution master beside the small copy,
-named `<stem>_full_size_send_only_if_asked.<ext>` -- the label is the point, on
-a metered link the master should never be the thing casually attached.
-
-Needs a server already running:  python -m luminary.cli serve --seed-demo
+The one thing worth stating twice, since it decides whether a capture means
+anything: `sheet` and `still` resync before every frame, so each is a keyframe
+-- the pattern's ground truth at that t. `clip` does not, so its deltas, and
+every artifact the installation would show, are the real ones. The wire rate
+is read off the socket, never passed in.
 """
 
 from __future__ import annotations
@@ -582,6 +552,51 @@ def human(path: Path) -> str:
 # ------------------------------------------------------------------------ main
 
 
+HELP = """
+Needs a server up, and it must have been started AFTER the pattern was written
+-- the registry is built at boot, because Python:
+
+    python -m luminary.cli serve --seed-demo
+
+(Faster, where pattern upload is enabled: POST the file instead of restarting.
+It hot-reloads the registry and returns an import error as JSON rather than
+letting the pattern go quietly missing.
+
+    curl -F "file=@patterns/my_pattern.py" http://127.0.0.1:8080/api/patterns
+
+Note it copies the file into the server's uploads dir, so a later edit needs
+another POST.)
+
+WHICH MODE
+  sheet   N frames across a span, tiled into one labelled image. For whoever
+          is ITERATING -- typically an agent in a cloud worker, which cannot
+          watch a video at all. One file, one look. Each tile resyncs first so
+          it is its own keyframe, which makes cost flat in the span: sampling
+          an hour of a pattern takes what sampling a second takes.
+  still   one frame at an exact t.
+  clip    a video. For whoever is DECIDING -- a human watching a pattern move
+          before merging it, since motion is the one thing a grid cannot show.
+          Keeps the delta chain intact, so its artifacts are the ones the
+          installation has. Writes a small copy to send plus a full-resolution
+          master named <stem>_full_size_send_only_if_asked.<ext>; on a metered
+          playa link the master should never be what gets casually attached.
+          Costs roughly 6x realtime, so a 30 s clip is a few minutes.
+
+EXAMPLES
+  python3 scripts/capture.py sheet --pattern life --lights pentagon-4A-37 \\
+      --at 60 --span 30 -o sheet.jpg
+  python3 scripts/capture.py still --pattern aurora --at 150.75 -o shot.png
+  python3 scripts/capture.py clip  --pattern life --lights pentagon-4A-37 \\
+      --at 55 --span 30 -o clip.webm
+
+sheet and clip print duplicate fraction and per-frame motion, so a capture can
+be judged without opening it -- a high duplicate fraction means the pattern (or
+the page) is not moving. A still is one frame and has none to give.
+
+`<mode> --help` lists that mode's own options.
+"""
+
+
 def main() -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--pattern", default="aurora")
@@ -603,7 +618,11 @@ def main() -> int:
     common.add_argument("--quality", type=int, default=92, help="jpeg quality")
     common.add_argument("-o", "--out", type=Path, required=True)
 
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        description="Capture what a pattern looks like, from the live web client.",
+        epilog=HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = ap.add_subparsers(dest="mode", required=True)
 
     sub.add_parser("still", parents=[common], help="one frame at an exact t")
